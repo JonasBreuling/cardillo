@@ -19,7 +19,8 @@ setup(
     description=description,
     long_description=long_description,
     install_requires=[
-        "numpy>=1.26.4",
+        # "numpy>=1.26.4",
+        "numpy==1.18.1",
         "scipy>=1.13.0",
         "matplotlib>=3.4.3",
         "black>=24.4.0",
@@ -30,6 +31,7 @@ setup(
         "trimesh>=4.0.5",
         "vtk==9.3.0",
         "scipy_dae @ git+https://github.com/JonasBreuling/scipy_dae.git",
+        "pybullet>=3.2.5",
     ],
     packages=find_packages(),
     python_requires=">=3.10",
