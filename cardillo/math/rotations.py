@@ -6,6 +6,8 @@ from cardillo.math import norm, cross3, ax2skew, ax2skew_a, LeviCivita3
 # angle_singular = 1.0e-6
 angle_singular = 0.0
 
+EYE3 = np.eye(3, dtype=float)
+
 
 def Exp_SO3(psi: np.ndarray) -> np.ndarray:
     """SO(3) exponential function, see Crisfield1999 above (4.1) and 

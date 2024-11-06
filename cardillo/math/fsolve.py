@@ -3,6 +3,7 @@ from scipy.linalg import qr, solve_triangular, svd
 from scipy.sparse import csc_array
 from scipy.sparse.linalg import spsolve, splu
 from scipy.sparse.linalg._dsolve._superlu import SuperLU
+from scipy.sparse.linalg import LinearOperator, gmres, lsqr, minres, bicg, bicgstab
 from scipy.optimize import OptimizeResult
 from warnings import warn
 
@@ -254,14 +255,195 @@ def fsolve(
     # Newton loop
     if not converged:
         for i in range(options.newton_max_iter):
+            # compute Newton step
+            dx = solve(x, -f)
+
+            # line search
+            # alpha = 1
+            alpha = backtracking_line_search(lambda x: fun(x, *fun_args), x, dx, f)
+            print(f"alpha: {alpha}")
+
             # Newton update
-            dx = solve(x, f)
-            Delta_x -= dx
+            Delta_x += alpha * dx
+            x = x0 + Delta_x
+
+            # # Newton update
+            # dx = solve(x, f)
+            # Delta_x -= dx
+            # x = x0 + Delta_x
+
+            # new function value, error and convergence check
+            f = np.atleast_1d(fun(x, *fun_args))
+            error = np.linalg.norm(f / scale) / scale.size**0.5
+            converged = error < 1
+            if converged:
+                break
+
+        if not converged:
+            warn(f"fsolve is not converged after {i} iterations with error {error:.2e}")
+
+        nit = i + 1
+
+    return OptimizeResult(
+        x=x,
+        success=converged,
+        error=error,
+        fun=f,
+        nit=nit,
+        nfev=nfev,
+        njev=njev,
+    )
+
+
+def jacobian_vector_product(F, x, v, *args, epsilon=1e-6, method="forward"):
+    """Compute the Jacobian vector product J(x) @ v, where J(x) = dF/dx(x)."""
+    # nonlocal njev
+    # njev += 1
+    match method:
+        case "forward":
+            return (F(x + epsilon * v, *args) - F(x, *args)) / epsilon
+        case "central":
+            return (F(x + epsilon * v, *args) - F(x - epsilon * v, *args)) / (2 * epsilon)
+        case _:
+            raise NotImplementedError
+
+
+def backtracking_line_search(F, x, delta_x, F0=None, alpha_init=1.0, beta=0.5, c=1e-4):
+    """Backtracking line search with Armijo condition."""
+    alpha = alpha_init
+    if F0 is None:
+        Fx = F(x)
+    else:
+        Fx = F0
+    # Fx_norm = np.linalg.norm(Fx) ** 2
+    fx = 0.5 * (Fx @ Fx)
+    nabla_fx_dx = jacobian_vector_product(F, x, delta_x)
+    nabla_fx_dx = np.dot(Fx, delta_x)
+
+    # Armijo condition check, see Nocedal2000 (3.4)
+    Fx_dx = F(x + alpha * delta_x)
+    fx_dx = 0.5 * (Fx_dx @ Fx_dx)
+    while fx_dx > fx + c * alpha * nabla_fx_dx:
+        alpha *= beta
+        Fx_dx = F(x + alpha * delta_x)
+        fx_dx = 0.5 * (Fx_dx @ Fx_dx)
+    return alpha
+
+
+def gmres_fsolve(
+    fun,
+    x0,
+    fun_args=(),
+    jac_args=(),
+    options=SolverOptions(),
+) -> tuple[np.ndarray, bool, float, int, np.ndarray]:
+    """Solve a nonlinear system of equations using (inexact) Newton method.
+    This function is inspired by scipy's `solve_collocation_system` found
+    in `scipy.integrate._ivp.radau`. Absolute and relative errors are used 
+    to terminate the iteration in accordance with Kelly1995 (1.12). See also 
+    Hairer1996 below (8.21).
+
+    Parameters
+    ----------
+    fun : callable
+        Nonlinear function with signature `fun(x, *fun_args)`.
+    x0 : ndarray, shape (n,)
+        Initial guess.
+    jac : callable, SuperLU, optional
+        Function defining the sparse Jacobian of `fun`. Alternatvely, this
+        can be an `SuperLU` object. Then, an inexact Newton method is
+        performed, see `inexact`.
+    fun_args: tuple
+        Additional arguments passed to `fun`.
+    jac_args: tuple
+        Additional arguments passed to `jac`.
+    inexact: Bool, optional
+        Apply inexact Newton method (Newton chord) with constant `J = jac(x0)`.
+    options: SolverOptions
+        Defines all required solver options.
+
+    Returns
+    -------
+    res : OptimizeResult
+        The optimization result represented as a `OptimizeResult` object.
+        Important attributes are: `x` the solution array, `success` a
+        Boolean flag indicating if the optimizer exited successfully, `error` 
+        the relative error, `fun` the current function value and `nit`, 
+        `nfev`, `njev` the counters for number of iterations, function and 
+        Jacobian evaluations, respectively.
+
+    References
+    ----------
+    Kelly1995: https://epubs.siam.org/doi/book/10.1137/1.9780898718898 \\
+    Haireri1996: https://link.springer.com/book/10.1007/978-3-642-05221-7
+    """
+    nit = 0
+    nfev = 0
+    njev = 0
+    n = len(x0)
+
+    if not isinstance(fun_args, tuple):
+        fun_args = (fun_args,)
+    if not jac_args:
+        jac_args = fun_args
+    elif not isinstance(jac_args, tuple):
+        jac_args = (jac_args,)
+
+    # wrap function
+    def fun(x, *args, f=fun):
+        nonlocal nfev
+        nfev += 1
+        return np.atleast_1d(f(x, *args))
+
+    # eliminate round-off errors
+    Delta_x = np.zeros_like(x0)
+    x = x0 + Delta_x
+
+    # initial function value
+    f = np.atleast_1d(fun(x, *fun_args))
+
+    # scaling with relative and absolute tolerances
+    scale = options.newton_atol + np.abs(f) * options.newton_rtol
+
+    # error of initial guess
+    error = np.linalg.norm(f / scale) / scale.size**0.5
+    converged = error < 1
+
+    # Newton loop
+    if not converged:
+        for i in range(options.newton_max_iter):
+            # compute Newton update with Jacobian vector product approximation and gmres
+            # A = LinearOperator(
+            #     (n, n), 
+            #     matvec=lambda v: jacobian_vector_product(fun, x, v, *jac_args),
+            #     rmatvec=lambda v: jacobian_vector_product(lambda x, *args: fun(x, *args).T, x, v, *jac_args),
+            # )
+            # M = None
+            # # dx, info = gmres(A, -f, x0=x, M=M, rtol=1e-4)
+            # # dx, info = minres(A, -f, x0=x, M=M, rtol=1e-4)
+            # # dx, info = bicgstab(A, f, M=M, rtol=1e-1)
+            # dx, *_ = lsqr(A, -f, iter_lim=int(1e3), show=False)
+            # # if info > 0:
+            # #     print(f"gmres not converged")
+
+            dx = np.linalg.solve(
+                approx_fprime(x, lambda x: fun(x, *jac_args)),
+                -f,
+            )
+
+            # line search
+            # alpha = 1
+            alpha = backtracking_line_search(lambda x: fun(x, *fun_args), x, dx, f)
+            print(f"alpha: {alpha}")
+
+            # Newton update
+            Delta_x += alpha * dx
             x = x0 + Delta_x
 
             # new function value, error and convergence check
             f = np.atleast_1d(fun(x, *fun_args))
             error = np.linalg.norm(f / scale) / scale.size**0.5
+            print(f"i: {i}; error: {error}; alpha: {alpha}")
             converged = error < 1
             if converged:
                 break

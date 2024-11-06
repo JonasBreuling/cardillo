@@ -2,7 +2,7 @@ import numpy as np
 from scipy.sparse import lil_array, bmat
 from tqdm import tqdm
 
-from cardillo.math.fsolve import fsolve
+from cardillo.math.fsolve import fsolve, gmres_fsolve
 from cardillo.solver.solver_options import SolverOptions
 from cardillo.solver.solution import Solution
 
@@ -144,6 +144,13 @@ class Newton:
                 jac_args=(self.load_steps[i],),
                 options=self.options,
             )
+            # sol = gmres_fsolve(
+            #     self.fun,
+            #     self.x[i],
+            #     fun_args=(self.load_steps[i],),
+            #     jac_args=(self.load_steps[i],),
+            #     options=self.options,
+            # )
             self.x[i] = sol.x
             if self.verbose:
                 pbar.set_description(self.__pbar_text(i, sol.nit, sol.error))
